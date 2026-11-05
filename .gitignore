@@ -1,0 +1,39 @@
+# Dependencies and generated output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.log
+
+# Local agent and editor state
+.claude/
+.codex/
+.orca/
+.DS_Store
+docs/handoffs/
+
+# Credentials and personal Spotify data (keep under ~/.config/spotify-mcp/)
+.env
+.env.*
+.config/
+.spotify-mcp/
+.mcp.json
+config/
+config.json
+data/
+cache/
+tokens/
+secrets/
+credentials/
+*.local.json
+*token*.json
+*credentials*.json
+*secret*.json
+spotify-config.json
+spotify-mcp.config.*
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.pem
+*.key
