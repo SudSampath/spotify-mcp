@@ -3,7 +3,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { expect, it } from "vitest";
 
-it("Given the built server without credentials, when a stdio client connects, then handshake, ping and empty tool listing succeed", async () => {
+it("Given the built server without credentials, when a stdio client connects, then handshake, ping and playback tool listing succeed", async () => {
   const client = new Client({ name: "spotify-mcp-test", version: "0.1.0" });
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -23,7 +23,23 @@ it("Given the built server without credentials, when a stdio client connects, th
     });
     expect(client.getServerCapabilities()).toHaveProperty("tools");
     await expect(client.ping()).resolves.toEqual({});
-    await expect(client.listTools()).resolves.toEqual({ tools: [] });
+    const listing = await client.listTools();
+    expect(listing.tools.map((tool) => tool.name).sort()).toEqual([
+      "list_devices",
+      "next",
+      "now_playing",
+      "pause",
+      "play",
+      "previous",
+      "resume",
+      "transfer_playback",
+    ]);
+    expect(
+      listing.tools
+        .filter((tool) => tool.annotations?.readOnlyHint)
+        .map((tool) => tool.name)
+        .sort(),
+    ).toEqual(["list_devices", "now_playing"]);
     expect(stderr).toBe("");
   } finally {
     await client.close();

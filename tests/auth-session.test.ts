@@ -215,7 +215,7 @@ describe("401 recovery", () => {
 
 it("Given a server without tokens, when a Spotify tool fails, then returns login instructions and stays usable after local login", async () => {
   const { store, client: spotify, fetch } = harness();
-  const server = createServer();
+  const server = createServer(spotify);
   server.registerTool(
     "test_spotify_access",
     {

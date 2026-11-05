@@ -1,9 +1,10 @@
 # Spotify MCP
 
 Personal Spotify MCP server for Claude Code and Codex, running locally over stdio.
-The server has a direct Spotify Web API client and PKCE login with automatic token
-refresh. It currently lists zero tools and starts without Spotify credentials.
-Playback and playlist tools are the next tickets.
+The server has eight playback tools, a direct Spotify Web API client, and PKCE
+login with automatic token refresh. It starts without Spotify credentials; tools
+return login instructions until you connect your account. Library sync and
+playlist curation are planned next.
 
 ## Develop
 
@@ -38,11 +39,47 @@ After building:
 pnpm dlx @modelcontextprotocol/inspector@2.13.0 --cli node dist/index.js --method tools/list
 ```
 
-Expected result: `{ "tools": [] }`. The pinned Inspector command requires Node
-22.19 or newer. To inspect interactively, omit `--cli` and `--method tools/list`.
+Expected result: the eight playback tools listed below. The pinned Inspector
+command requires Node 22.19 or newer. To inspect interactively, omit `--cli` and
+`--method tools/list`.
 
 The automated stdio test also verifies the handshake, server identity, tool
-capability, ping, and empty tool listing with no inherited credentials.
+capability, ping, and playback tool listing with no inherited credentials.
+
+## Playback tools
+
+| Tool                               | Behavior                                                                                                                   |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `now_playing`                      | Read the current track, artists, album, position, duration, device, and URI.                                               |
+| `list_devices`                     | Read available devices, their IDs, active state, and restrictions.                                                         |
+| `play({uri?, query?, device_id?})` | Start a track, album, or playlist URI, or search and play the best matching track. Supply exactly one of `uri` or `query`. |
+| `pause({device_id?})`              | Pause playback.                                                                                                            |
+| `resume({device_id?})`             | Resume the existing playback context.                                                                                      |
+| `next({device_id?})`               | Skip to the next track.                                                                                                    |
+| `previous({device_id?})`           | Return to the previous track.                                                                                              |
+| `transfer_playback({device_id})`   | Move playback to a device while preserving the playing/paused state.                                                       |
+
+For example, call `play` with `{ "query": "track title artist name" }`. Search
+requests five Spotify results and selects the first playable match. Track URIs use
+Spotify's `uris` playback field; album and playlist URIs use `context_uri`.
+
+Without `device_id`, controls use an active, unrestricted device. If none exists,
+the tool returns `needs_device`, the available devices, and instructions to choose
+one. It does not select an inactive device automatically. If no devices are
+available, open Spotify on the device you want to use and retry. Explicitly
+selected unavailable or restricted devices also return selection instructions.
+
+`now_playing` and `list_devices` are marked read-only; the other tools change
+playback and are annotated accordingly. No playback returns a successful idle
+response. Spotify errors retain the HTTP status and provider message, including
+Premium or permission errors. Playback control requires Spotify Premium.
+
+To verify live reads after login:
+
+```sh
+pnpm dlx @modelcontextprotocol/inspector@2.13.0 --cli node dist/index.js --method tools/call --tool-name list_devices
+pnpm dlx @modelcontextprotocol/inspector@2.13.0 --cli node dist/index.js --method tools/call --tool-name now_playing
+```
 
 ## Connect your Spotify account
 
@@ -68,7 +105,7 @@ replace the old value; a refresh response without one preserves the existing
 refresh token. Revoked credentials ask you to run `pnpm auth` again.
 
 `createSpotifyClient()` in `src/spotify/session.ts` connects the HTTP client to
-this token lifecycle. Future Spotify tools must use `runSpotifyTool()` so missing
+this token lifecycle. Spotify tools use `runSpotifyTool()` so missing
 or revoked credentials produce readable MCP errors and leave the server running.
 The server reads tokens lazily, so a successful login also fixes an already-running
 server's next Spotify call.
@@ -116,5 +153,5 @@ SQLite data. Use only synthetic fixtures in the repository.
 - [Spotify PKCE login](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow)
 - [Spotify token refresh](https://developer.spotify.com/documentation/web-api/tutorials/refreshing-tokens)
 
-Planned next: playback tools, followed by library sync, catalog resolution, playlist
-previews and commits, and optional Last.fm tag-based discovery.
+Planned next: library sync, catalog resolution, playlist previews and commits, and
+optional Last.fm tag-based discovery.
