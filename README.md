@@ -1,15 +1,16 @@
 # Spotify MCP
 
 Personal Spotify MCP server for Claude Code and Codex, running locally over stdio.
-The server has eight playback tools, a direct Spotify Web API client, and PKCE
-login with automatic token refresh. It starts without Spotify credentials; tools
-return login instructions until you connect your account. Library sync and
-playlist curation are planned next.
+The server has eight playback tools, two local-library tools, a direct Spotify
+Web API client, and PKCE login with automatic token refresh. It starts without
+Spotify credentials; Spotify requests return login instructions until you connect
+your account. Catalog resolution and playlist curation are planned next.
 
 ## Develop
 
-Use Node **22.12 or newer** and **pnpm 10.33.0**. The MCP SDK requires Node 20 or
-newer; the test runner requires Node 22.12 or newer.
+Use Node **22.13 or newer** and **pnpm 10.33.0**. The local cache uses Node's built-in
+SQLite, available without an experimental command-line flag from Node 22.13.
+Node 22 may emit a SQLite experimental warning on stderr when the cache first opens.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -39,12 +40,12 @@ After building:
 pnpm dlx @modelcontextprotocol/inspector@2.13.0 --cli node dist/index.js --method tools/list
 ```
 
-Expected result: the eight playback tools listed below. The pinned Inspector
+Expected result: the ten playback and library tools listed below. The pinned Inspector
 command requires Node 22.19 or newer. To inspect interactively, omit `--cli` and
 `--method tools/list`.
 
 The automated stdio test also verifies the handshake, server identity, tool
-capability, ping, and playback tool listing with no inherited credentials.
+capability, ping, and tool listing with no inherited credentials.
 
 ## Playback tools
 
@@ -80,6 +81,53 @@ To verify live reads after login:
 pnpm dlx @modelcontextprotocol/inspector@2.13.0 --cli node dist/index.js --method tools/call --tool-name list_devices
 pnpm dlx @modelcontextprotocol/inspector@2.13.0 --cli node dist/index.js --method tools/call --tool-name now_playing
 ```
+
+## Liked Songs cache
+
+| Tool                                                                   | Behavior                                                                                                                                                                  |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sync_library({full?})`                                                | Read Liked Songs and cache metadata locally. Incremental by default after the initial complete sync; `full: true` reconciles the entire cache and removes unliked tracks. |
+| `get_library({genre?, artist?, year?, added_after?, limit?, offset?})` | Read compact track lines from the local cache without calling Spotify.                                                                                                    |
+
+The database is `~/.config/spotify-mcp/library.sqlite`, with mode `0600` inside the
+private config directory. Tracks retain URI, title, artists, album, release year,
+and date added. Artist metadata is cached and reused. No library operation likes,
+unlikes, or otherwise changes anything in Spotify.
+
+Incremental sync reads newest-added pages until it passes the previous completed
+sync's timestamp, including all tracks tied at that timestamp. Failed syncs retain
+completed pages and artist lookups without advancing that checkpoint. A retry
+upserts existing rows. Full-sync removals happen only after every page succeeds.
+Concurrent syncs are rejected; cache queries remain available during a sync.
+
+`get_library` combines supplied filters with AND. Genre and artist filters are
+literal substrings; `year` is the album release year. `added_after` accepts an ISO
+date or timestamp and excludes tracks added exactly at the boundary. Results are
+ordered by date added descending, then URI, with default `limit=50`, maximum 100,
+and default `offset=0`. The response includes a matching total and one line per
+track: `artist – title – year – genres – uri`. Long display fields are clipped;
+the URI is retained in full and the stored metadata is unchanged. Before the first
+completed sync, the tool asks you to run `sync_library`.
+
+Initial sync can take several minutes for a large library, especially when
+artist-genre lookups are available. It honors Spotify rate limits and sends MCP
+progress notifications when the client requests them. Allow a sufficiently long
+tool timeout in your MCP host. Null/unavailable and local-only tracks without
+usable Spotify metadata are skipped and counted.
+
+### Genre coverage
+
+Spotify's artist `genres` field is deprecated and may be absent for an app. After
+three responses omit the field, if no response has included a genres array, sync
+stops further artist lookups and caches the remaining identities without genre
+labels. An explicit empty array does not trigger this behavior. The omission
+decision is retained in the local cache so incremental sync does not repeat those
+unproductive requests.
+
+Sync and query results report genre coverage and warn when the field was omitted.
+Genre filtering uses only actual cached labels; missing metadata is never guessed.
+Artist genres are hints about a track, rather than track-level classifications.
+Last.fm enrichment is planned next to supply separately attributed community tags.
 
 ## Connect your Spotify account
 
@@ -140,7 +188,7 @@ Use Spotify's current endpoints in subsequent tickets: `/playlists/{id}/items`,
 
 ## Local data
 
-Keep tokens, configuration, and the future library database under
+Keep tokens, configuration, and the library database under
 `~/.config/spotify-mcp/`, outside the repository. `.gitignore` also excludes local
 agent state, dependencies, build output, environment files, credential files, and
 SQLite data. Use only synthetic fixtures in the repository.
@@ -152,6 +200,8 @@ SQLite data. Use only synthetic fixtures in the repository.
 - [Spotify rate limits](https://developer.spotify.com/documentation/web-api/concepts/rate-limits)
 - [Spotify PKCE login](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow)
 - [Spotify token refresh](https://developer.spotify.com/documentation/web-api/tutorials/refreshing-tokens)
+- [Spotify saved tracks](https://developer.spotify.com/documentation/web-api/reference/get-users-saved-tracks)
+- [Spotify artist metadata](https://developer.spotify.com/documentation/web-api/reference/get-an-artist)
 
-Planned next: library sync, catalog resolution, playlist previews and commits, and
-optional Last.fm tag-based discovery.
+Planned next: Last.fm tag enrichment, catalog resolution, playlist previews and
+commits, and tag-/seed-based discovery.

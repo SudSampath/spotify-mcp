@@ -25,6 +25,7 @@ export interface SpotifyClientOptions {
 export interface SpotifyRequestOptions {
   method?: "GET" | "POST" | "PUT" | "DELETE";
   body?: unknown;
+  signal?: AbortSignal | undefined;
 }
 
 export class SpotifyApiError extends Error {
@@ -116,6 +117,7 @@ export class SpotifyClient {
     let refreshed = false;
     let retryToken: string | undefined;
     for (;;) {
+      options.signal?.throwIfAborted();
       const token = retryToken ?? (await this.getAccessToken());
       retryToken = undefined;
       if (!token.trim()) throw new Error("A Spotify access token is required.");
@@ -128,6 +130,7 @@ export class SpotifyClient {
         },
         ...(body === undefined ? {} : { body }),
         redirect: "error",
+        ...(options.signal ? { signal: options.signal } : {}),
       });
 
       if (response.ok) {
