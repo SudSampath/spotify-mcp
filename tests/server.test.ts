@@ -25,6 +25,7 @@ it("Given the built server without credentials, when a stdio client connects, th
     await expect(client.ping()).resolves.toEqual({});
     const listing = await client.listTools();
     expect(listing.tools.map((tool) => tool.name).sort()).toEqual([
+      "discover_tracks",
       "enrich_library",
       "get_library",
       "get_track_tags",
@@ -34,7 +35,9 @@ it("Given the built server without credentials, when a stdio client connects, th
       "pause",
       "play",
       "previous",
+      "resolve_tracks",
       "resume",
+      "search",
       "sync_library",
       "transfer_playback",
     ]);
@@ -43,7 +46,15 @@ it("Given the built server without credentials, when a stdio client connects, th
         .filter((tool) => tool.annotations?.readOnlyHint)
         .map((tool) => tool.name)
         .sort(),
-    ).toEqual(["get_library", "get_track_tags", "list_devices", "now_playing"]);
+    ).toEqual([
+      "discover_tracks",
+      "get_library",
+      "get_track_tags",
+      "list_devices",
+      "now_playing",
+      "resolve_tracks",
+      "search",
+    ]);
     expect(stderr).toBe("");
   } finally {
     await client.close();

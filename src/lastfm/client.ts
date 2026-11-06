@@ -1,6 +1,12 @@
 import { z } from "zod";
 import { loadLastfmApiKey } from "./config.js";
-import { type LastfmTag, normalizeTag, type TagLevel } from "./types.js";
+import {
+  type LastfmCandidate,
+  type LastfmCandidateSource,
+  type LastfmTag,
+  normalizeTag,
+  type TagLevel,
+} from "./types.js";
 
 const ENDPOINT = "https://ws.audioscrobbler.com/2.0/";
 const explanations: Record<number, string> = {
@@ -75,7 +81,7 @@ function sourceUrl(level: TagLevel, artist: string, title?: string): string {
     : base;
 }
 
-function tagUrl(value: string | undefined, name: string): string {
+function safeLastfmUrl(value: string | undefined, fallback: string): string {
   try {
     const url = new URL(
       value?.startsWith("www.") ? `https://${value}` : (value ?? ""),
@@ -94,7 +100,14 @@ function tagUrl(value: string | undefined, name: string): string {
   } catch {
     /* Use a canonical Last.fm tag URL for absent or unsafe provider URLs. */
   }
-  return `https://www.last.fm/tag/${encodeURIComponent(name)}`;
+  return fallback;
+}
+
+function tagUrl(value: string | undefined, name: string): string {
+  return safeLastfmUrl(
+    value,
+    `https://www.last.fm/tag/${encodeURIComponent(name)}`,
+  );
 }
 
 function retryDelay(
@@ -175,22 +188,46 @@ export class LastfmClient {
     return operation;
   }
 
-  private async lookup(
-    level: TagLevel,
+  getTagTracks(
+    tag: string,
+    limit: number,
+    options: RequestOptions,
+  ): Promise<LastfmCandidateSource> {
+    return this.enqueue(() => this.candidates({ tag }, limit, options));
+  }
+
+  getSimilarTracks(
     artist: string,
-    title: string | null,
+    title: string,
+    limit: number,
+    options: RequestOptions,
+  ): Promise<LastfmCandidateSource> {
+    return this.enqueue(() =>
+      this.candidates({ artist, title }, limit, options),
+    );
+  }
+
+  private enqueue<T>(action: () => Promise<T>): Promise<T> {
+    const operation = this.queued.then(action);
+    this.queued = operation.catch(() => {});
+    return operation;
+  }
+
+  private async request(
+    method:
+      | "track.getTopTags"
+      | "artist.getTopTags"
+      | "tag.getTopTracks"
+      | "track.getSimilar",
+    parameters: Record<string, string>,
     options: RequestOptions,
   ) {
-    if (!artist.trim() || (level === "track" && !title?.trim()))
-      throw new Error("Last.fm needs an artist and, for track tags, a title.");
     const key = await this.getApiKey();
     const url = new URL(ENDPOINT);
     url.search = new URLSearchParams({
-      method: level === "track" ? "track.getTopTags" : "artist.getTopTags",
+      ...parameters,
+      method,
       api_key: key,
-      artist,
-      ...(level === "track" ? { track: title ?? "" } : {}),
-      autocorrect: "0",
       format: "json",
     }).toString();
     for (let attempt = 0; ; attempt++) {
@@ -222,7 +259,6 @@ export class LastfmClient {
           await this.sleep(1_000 * 2 ** attempt);
           continue;
         }
-        // Fetch errors can embed the credential-bearing URL. Never forward them.
         throw new LastfmApiError(undefined, undefined);
       }
       try {
@@ -252,51 +288,189 @@ export class LastfmClient {
         );
         continue;
       }
-      if (response.ok && code === 6)
-        return {
-          tags: [],
-          sourceUrl: sourceUrl(level, artist, title ?? undefined),
-          notFound: true,
-          cacheTtlMs: cacheLifetime(response.headers, this.now()),
-        };
-      if (!response.ok || code !== undefined)
+      if (!response.ok || (code !== undefined && code !== 6))
         throw new LastfmApiError(response.status, code);
-      const parsed = tagsSchema.safeParse(body);
-      if (!parsed.success) throw new LastfmApiError(response.status, undefined);
-      const raw = parsed.data.toptags.tag;
-      const values = Array.isArray(raw)
-        ? raw
-        : raw && typeof raw === "object"
-          ? [raw]
-          : [];
-      const tags = new Map<string, LastfmTag>();
-      for (const value of values) {
-        const name = value.name.replaceAll(key, "[redacted]");
-        const normalized = normalizeTag(name);
-        if (!normalized || name.length > 200) continue;
-        const number =
-          value.count === undefined || value.count === ""
-            ? null
-            : Number(value.count);
-        const count =
-          number !== null && Number.isFinite(number) && number >= 0
-            ? number
-            : null;
-        const previous = tags.get(normalized);
-        if (!previous || (count ?? -1) > (previous.count ?? -1))
-          tags.set(normalized, {
-            name,
-            normalized,
-            count,
-            url: tagUrl(value.url?.replaceAll(key, "redacted"), name),
-          });
-      }
       return {
-        tags: [...tags.values()].slice(0, 20),
-        sourceUrl: sourceUrl(level, artist, title ?? undefined),
-        notFound: false,
+        body,
+        notFound: code === 6,
+        status: response.status,
         cacheTtlMs: cacheLifetime(response.headers, this.now()),
+        redact: (value: string, replacement = "[redacted]") =>
+          value.replaceAll(key, replacement),
       };
     }
+  }
+
+  private async lookup(
+    level: TagLevel,
+    artist: string,
+    title: string | null,
+    options: RequestOptions,
+  ) {
+    if (!artist.trim() || (level === "track" && !title?.trim()))
+      throw new Error("Last.fm needs an artist and, for track tags, a title.");
+    const response = await this.request(
+      level === "track" ? "track.getTopTags" : "artist.getTopTags",
+      {
+        artist,
+        ...(level === "track" ? { track: title ?? "" } : {}),
+        autocorrect: "0",
+      },
+      options,
+    );
+    if (response.notFound)
+      return {
+        tags: [],
+        sourceUrl: sourceUrl(level, artist, title ?? undefined),
+        notFound: true,
+        cacheTtlMs: response.cacheTtlMs,
+      };
+    const parsed = tagsSchema.safeParse(response.body);
+    if (!parsed.success) throw new LastfmApiError(response.status, undefined);
+    const raw = parsed.data.toptags.tag;
+    const values = Array.isArray(raw)
+      ? raw
+      : raw && typeof raw === "object"
+        ? [raw]
+        : [];
+    const tags = new Map<string, LastfmTag>();
+    for (const value of values) {
+      const name = response.redact(value.name);
+      const normalized = normalizeTag(name);
+      if (!normalized || name.length > 200) continue;
+      const number =
+        value.count === undefined || value.count === ""
+          ? null
+          : Number(value.count);
+      const count =
+        number !== null && Number.isFinite(number) && number >= 0
+          ? number
+          : null;
+      const previous = tags.get(normalized);
+      if (!previous || (count ?? -1) > (previous.count ?? -1))
+        tags.set(normalized, {
+          name,
+          normalized,
+          count,
+          url: tagUrl(
+            value.url ? response.redact(value.url, "redacted") : undefined,
+            name,
+          ),
+        });
+    }
+    return {
+      tags: [...tags.values()].slice(0, 20),
+      sourceUrl: sourceUrl(level, artist, title ?? undefined),
+      notFound: false,
+      cacheTtlMs: response.cacheTtlMs,
+    };
+  }
+
+  private async candidates(
+    input: { tag: string } | { artist: string; title: string },
+    limit: number,
+    options: RequestOptions,
+  ): Promise<LastfmCandidateSource> {
+    const bounded = Math.min(50, Math.max(1, Math.trunc(limit)));
+    const tagged = "tag" in input;
+    const response = tagged
+      ? await this.request(
+          "tag.getTopTracks",
+          { tag: input.tag, limit: String(bounded) },
+          options,
+        )
+      : await this.request(
+          "track.getSimilar",
+          {
+            artist: input.artist,
+            track: input.title,
+            autocorrect: "0",
+            limit: String(bounded),
+          },
+          options,
+        );
+    const url = tagged
+      ? `https://www.last.fm/tag/${encodeURIComponent(input.tag)}`
+      : sourceUrl("track", input.artist, input.title);
+    if (response.notFound)
+      return {
+        candidates: [],
+        source_url: url,
+        cacheTtlMs: response.cacheTtlMs,
+      };
+    const root = z.record(z.string(), z.unknown()).safeParse(response.body);
+    const page = z
+      .object({ track: z.unknown().optional() })
+      .safeParse(
+        root.success
+          ? root.data[tagged ? "tracks" : "similartracks"]
+          : undefined,
+      );
+    if (!page.success) throw new LastfmApiError(response.status, undefined);
+    const raw = page.data.track;
+    if (
+      raw !== undefined &&
+      raw !== null &&
+      raw !== "" &&
+      !Array.isArray(raw) &&
+      typeof raw !== "object"
+    )
+      throw new LastfmApiError(response.status, undefined);
+    const values = Array.isArray(raw)
+      ? raw
+      : raw && typeof raw === "object"
+        ? [raw]
+        : [];
+    const schema = z.object({
+      name: z.string(),
+      artist: z.union([z.string(), z.object({ name: z.string() })]),
+      url: z.string().optional(),
+      match: z.union([z.string(), z.number()]).nullish(),
+      "@attr": z
+        .object({ rank: z.union([z.string(), z.number()]).optional() })
+        .optional(),
+    });
+    const candidates: LastfmCandidate[] = [];
+    for (const [index, value] of values.entries()) {
+      const parsed = schema.safeParse(value);
+      if (!parsed.success) continue;
+      const artist = response
+        .redact(
+          typeof parsed.data.artist === "string"
+            ? parsed.data.artist
+            : parsed.data.artist.name,
+        )
+        .trim();
+      const title = response.redact(parsed.data.name).trim();
+      if (!artist || !title || artist.length > 200 || title.length > 300)
+        continue;
+      const similarity =
+        parsed.data.match === null ||
+        parsed.data.match === undefined ||
+        parsed.data.match === ""
+          ? undefined
+          : Number(parsed.data.match);
+      const rank = Number(parsed.data["@attr"]?.rank);
+      candidates.push({
+        artist,
+        title,
+        source_url: safeLastfmUrl(
+          parsed.data.url
+            ? response.redact(parsed.data.url, "redacted")
+            : undefined,
+          sourceUrl("track", artist, title),
+        ),
+        rank: Number.isFinite(rank) && rank > 0 ? rank : index + 1,
+        ...(similarity !== undefined &&
+        Number.isFinite(similarity) &&
+        similarity >= 0
+          ? { similarity_score: similarity }
+          : {}),
+      });
+      if (candidates.length === bounded) break;
+    }
+    if (values.length && !candidates.length)
+      throw new LastfmApiError(response.status, undefined);
+    return { candidates, source_url: url, cacheTtlMs: response.cacheTtlMs };
   }
 }

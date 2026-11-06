@@ -11,6 +11,159 @@ const tagged = {
     tag: [{ name: "Jazz", count: "75", url: "http://www.last.fm/tag/jazz" }],
   },
 };
+
+describe("Last.fm candidate methods", () => {
+  it.each(["tag", "seed"])(
+    "Given a %s discovery source, when fetched, then uses the read-only endpoint, bounded limit and safe provenance",
+    async (kind) => {
+      const { client, fetch } = harness();
+      const row = {
+        name: "Synthetic Song",
+        artist: { name: "Synthetic Artist" },
+        match: "49.5",
+        "@attr": { rank: "7" },
+        url: "http://www.last.fm/music/Synthetic/_/Song?api_key=private#fragment",
+      };
+      fetch.mockResolvedValueOnce(
+        Response.json({
+          [kind === "tag" ? "tracks" : "similartracks"]: { track: row },
+        }),
+      );
+      const options = { budget: new RequestBudget(1) };
+      const result =
+        kind === "tag"
+          ? await client.getTagTracks("uptempo", 500, options)
+          : await client.getSimilarTracks(
+              "Synthetic Artist",
+              "Synthetic Song",
+              500,
+              options,
+            );
+      const url = new URL(String(fetch.mock.calls[0]?.[0]));
+      expect(url.origin).toBe("https://ws.audioscrobbler.com");
+      expect(url.searchParams.get("method")).toBe(
+        kind === "tag" ? "tag.getTopTracks" : "track.getSimilar",
+      );
+      expect(url.searchParams.get("limit")).toBe("50");
+      expect(url.searchParams.get(kind === "tag" ? "tag" : "artist")).toBe(
+        kind === "tag" ? "uptempo" : "Synthetic Artist",
+      );
+      if (kind === "seed")
+        expect(url.searchParams.get("autocorrect")).toBe("0");
+      expect(fetch.mock.calls[0]?.[1]?.method).toBe("GET");
+      expect(result.candidates).toEqual([
+        {
+          artist: "Synthetic Artist",
+          title: "Synthetic Song",
+          rank: 7,
+          similarity_score: 49.5,
+          source_url: "https://www.last.fm/music/Synthetic/_/Song",
+        },
+      ]);
+      expect(JSON.stringify(result)).not.toContain(key);
+    },
+  );
+
+  it("Given mixed malformed candidates and unsafe URLs, when parsed, then skips invalid rows and replaces unsafe links", async () => {
+    const { client, fetch } = harness();
+    fetch.mockResolvedValueOnce(
+      Response.json({
+        tracks: {
+          track: [
+            { name: "Incomplete" },
+            {
+              name: "Synthetic Song",
+              artist: "Synthetic Artist",
+              url: "https://evil.example/track",
+              match: "invalid",
+            },
+          ],
+        },
+      }),
+    );
+    const result = await client.getTagTracks("jazz", 2, {
+      budget: new RequestBudget(1),
+    });
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]).toMatchObject({
+      artist: "Synthetic Artist",
+      title: "Synthetic Song",
+      rank: 2,
+    });
+    expect(result.candidates[0]?.source_url).toMatch(
+      /^https:\/\/www\.last\.fm\/music\//,
+    );
+    expect(result.candidates[0]).not.toHaveProperty("similarity_score");
+  });
+
+  it.each([
+    { tracks: {} },
+    { tracks: { track: [] } },
+    { tracks: { track: "" } },
+  ])(
+    "Given an empty tag chart %j, when parsed, then returns a cacheable empty source",
+    async (body) => {
+      const { client, fetch } = harness();
+      fetch.mockResolvedValueOnce(Response.json(body));
+      expect(
+        (await client.getTagTracks("jazz", 2, { budget: new RequestBudget(1) }))
+          .candidates,
+      ).toEqual([]);
+    },
+  );
+
+  it.each([
+    {},
+    { tracks: { track: [{ unrelated: true }] } },
+    { tracks: { track: "invalid" } },
+  ])(
+    "Given malformed discovery data %j, when parsed, then reports an API failure instead of silently caching no matches",
+    async (body) => {
+      const { client, fetch } = harness();
+      fetch.mockResolvedValueOnce(Response.json(body));
+      await expect(
+        client.getTagTracks("jazz", 2, { budget: new RequestBudget(1) }),
+      ).rejects.toThrow("Last.fm");
+    },
+  );
+
+  it("Given HTTP 200 rate limit code 29, when discovery retries, then honors Retry-After and counts both attempts", async () => {
+    const { client, fetch, sleep } = harness({ maxRetries: 1 });
+    fetch
+      .mockResolvedValueOnce(
+        Response.json(
+          { error: 29, message: "Rate limited" },
+          { headers: { "Retry-After": "2" } },
+        ),
+      )
+      .mockResolvedValueOnce(Response.json({ similartracks: { track: [] } }));
+    const budget = new RequestBudget(2);
+    expect(
+      (
+        await client.getSimilarTracks("Synthetic Artist", "Synthetic Song", 2, {
+          budget,
+        })
+      ).candidates,
+    ).toEqual([]);
+    expect(budget.used).toBe(2);
+    expect(sleep).toHaveBeenCalledWith(2000);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("Given discovery no-store headers, when fetched, then carries the provider cache restriction", async () => {
+    const { client, fetch } = harness();
+    fetch.mockResolvedValueOnce(
+      Response.json(
+        { tracks: { track: [] } },
+        { headers: { "Cache-Control": "no-store" } },
+      ),
+    );
+    expect(
+      (await client.getTagTracks("jazz", 2, { budget: new RequestBudget(1) }))
+        .cacheTtlMs,
+    ).toBe(0);
+  });
+});
 function harness(options: { maxRetries?: number } = {}) {
   const fetch = vi.fn<typeof globalThis.fetch>();
   const sleep = vi.fn<(ms: number) => Promise<void>>();

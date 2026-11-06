@@ -1,11 +1,11 @@
 # Spotify MCP
 
 Personal Spotify MCP server for Claude Code and Codex, running locally over stdio.
-The server has eight playback tools, two local-library tools, two Last.fm
-enrichment tools, a direct Spotify Web API client, and PKCE login with automatic
-token refresh. It starts without
-Spotify credentials; Spotify requests return login instructions until you connect
-your account. Catalog resolution and playlist curation are planned next.
+The server has fifteen tools for playback, catalog search and resolution, a local
+Liked Songs cache, and optional Last.fm enrichment and discovery. It uses the
+Spotify Web API with PKCE login and automatic token refresh. It starts without
+credentials; Spotify requests return login instructions until you connect your
+account. Playlist previews and creation are planned next.
 
 ## Develop
 
@@ -41,7 +41,7 @@ After building:
 pnpm dlx @modelcontextprotocol/inspector@2.13.0 --cli node dist/index.js --method tools/list
 ```
 
-Expected result: the twelve playback, library, and enrichment tools listed below. The pinned Inspector
+Expected result: fifteen playback, catalog, library, and Last.fm tools listed below. The pinned Inspector
 command requires Node 22.19 or newer. To inspect interactively, omit `--cli` and
 `--method tools/list`.
 
@@ -82,6 +82,32 @@ To verify live reads after login:
 pnpm dlx @modelcontextprotocol/inspector@2.13.0 --cli node dist/index.js --method tools/call --tool-name list_devices
 pnpm dlx @modelcontextprotocol/inspector@2.13.0 --cli node dist/index.js --method tools/call --tool-name now_playing
 ```
+
+## Catalog search and identity resolution
+
+| Tool                                               | Behavior                                                                                                                                                         |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `search({query, type?, limit?})`                   | Search Spotify tracks, artists, albums, playlists, shows, episodes, or audiobooks. Defaults to tracks and five results; limits above ten are capped at ten.      |
+| `resolve_tracks({tracks: [{artist, title}, ...]})` | Verify up to fifty suggestions. Returns `matched` and `unresolved` groups retaining input order and original indexes. Only matched entries include Spotify URIs. |
+
+Track searches return names, artists, albums, years, and URIs. Resolution tries
+`track:"title" artist:"artist"` first, then a plain query if filters are rejected
+or no acceptable identity is found. Normalized identity matching tolerates case,
+accents, punctuation, guest credits, and remaster labels. Different titles,
+artists, or uncertain versions stay unresolved. Fuzzy scores rank the closest
+candidate but cannot authorize a match. Studio recordings are preferred unless a
+live/remix version was requested. Explicitly unavailable or local-only recordings
+are not accepted. A verified URI establishes identity; playback still depends on
+Spotify availability and account access.
+
+For example, `resolve_tracks` accepts:
+
+```json
+{ "tracks": [{ "artist": "Herbie Hancock", "title": "Chameleon" }] }
+```
+
+Both tools are read-only, honor Spotify rate limits, and support cancellation.
+Batch resolution sends progress notifications when the MCP client requests them.
 
 ## Liked Songs cache
 
@@ -181,9 +207,44 @@ for `Retry-After`, including Last.fm error payloads returned with HTTP 200. API 
 and credential-bearing URLs are excluded from surfaced errors and stored source
 links. Missing keys or outages leave Spotify tools and cached-library reads usable.
 
-This phase enriches the local library. Tag/seed discovery and catalog candidates
-will follow the Spotify identity resolver; arbitrary Last.fm name lookups do not
-invent Spotify URIs.
+## Last.fm discovery
+
+`discover_tracks({tags?, seeds?, limit?, tag_level?, request_budget?, resolve_limit?})`
+finds suggestions from community tags and/or example tracks. Supply one to five
+tags or artist/title seeds (up to five of each). The result limit defaults to 20,
+maximum 50. For example:
+
+```json
+{"tags":["uptempo"],"tag_level":"track","limit":10}
+{"seeds":[{"artist":"Herbie Hancock","title":"Chameleon"}],"limit":10}
+```
+
+Matching cached Liked Songs come first. Last.fm tag charts and similar-track lists
+fill remaining places; new catalog identities pass through the Spotify resolver.
+Candidates and final Spotify URIs are deduplicated. Each result identifies library
+or catalog membership, identity verification, supporting labels or raw similarity
+scores, source links, and retrieval/expiry times. Unresolved candidates are returned
+separately without actionable Spotify URIs.
+
+Multiple tags require evidence for every tag. Seed similarity alone cannot prove
+a requested tag. `tag_level` controls cached evidence (`any` by default, or
+`track`/`artist`); tag-chart associations are track evidence. Unknown and expired
+labels do not match. Similarity and tags describe community associations, not
+measured BPM or beats. Sparse coverage can yield fewer results than requested;
+responses include coverage, request counts, and warnings.
+
+Discovery defaults to ten Last.fm HTTP attempts (maximum twenty, retries included)
+and twenty catalog candidate verifications (maximum fifty). Each source reads at
+most fifty candidates. Verification uses at most two search queries per candidate,
+with the Spotify client's bounded rate-limit retries. Library identities are
+checked locally before spending catalog requests. There is no automatic
+whole-library enrichment pass.
+
+Source lists are cached for 24 hours, or 6 hours when empty/not found. Shorter
+provider expiry and no-store rules apply. Repeating a source lookup avoids Last.fm
+HTTP; catalog identities are verified again. Missing keys or provider failures
+retain supported local matches with a warning. Spotify-only tools remain usable.
+Discovery returns suggestions and never changes playlists, playback, or accounts.
 
 ## Connect your Spotify account
 
@@ -251,6 +312,10 @@ SQLite data. Use only synthetic fixtures in the repository.
 
 ## References and next work
 
+- [Spotify catalog search](https://developer.spotify.com/documentation/web-api/reference/search)
+- [Last.fm tag charts](https://www.last.fm/api/show/tag.getTopTracks)
+- [Last.fm similar tracks](https://www.last.fm/api/show/track.getSimilar)
+
 - [Official MCP SDK stdio guide](https://ts.sdk.modelcontextprotocol.io/v2/serving/stdio)
 - [Spotify API calls](https://developer.spotify.com/documentation/web-api/concepts/api-calls)
 - [Spotify rate limits](https://developer.spotify.com/documentation/web-api/concepts/rate-limits)
@@ -259,5 +324,4 @@ SQLite data. Use only synthetic fixtures in the repository.
 - [Spotify saved tracks](https://developer.spotify.com/documentation/web-api/reference/get-users-saved-tracks)
 - [Spotify artist metadata](https://developer.spotify.com/documentation/web-api/reference/get-an-artist)
 
-Planned next: catalog resolution, tag-/seed-based discovery, and playlist previews
-and commits.
+Planned next: playlist previews and explicit creation/updates.
