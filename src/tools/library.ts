@@ -1,5 +1,6 @@
 import type { CallToolResult, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { normalizeTag } from "../lastfm/types.js";
 import type { LibraryCache, LibraryTrack } from "../library/cache.js";
 import { LibraryService } from "../library/sync.js";
 import type { SpotifyClient } from "../spotify/client.js";
@@ -16,7 +17,11 @@ function short(value: string, length: number): string {
   return text.length > length ? `${text.slice(0, length - 1)}…` : text;
 }
 
-export function libraryLine(track: LibraryTrack, genre?: string): string {
+export function libraryLine(
+  track: LibraryTrack,
+  genre?: string,
+  tag?: string,
+): string {
   const genres = genre
     ? [
         ...track.genres.filter((value) =>
@@ -27,7 +32,14 @@ export function libraryLine(track: LibraryTrack, genre?: string): string {
         ),
       ]
     : track.genres;
-  return `${short(track.artists.map((artist) => artist.name).join(", "), 32)} – ${short(track.title, 48)} – ${track.year ?? "?"} – ${short(genres.slice(0, 2).join(", "), 32) || "-"} – ${track.uri}`;
+  const tags = tag
+    ? track.tags.filter((value) => value.normalized.includes(normalizeTag(tag)))
+    : track.tags;
+  const labels = tags
+    .slice(0, 2)
+    .map((value) => `Last.fm ${value.level}: ${short(value.name, 20)}`)
+    .join(", ");
+  return `${short(track.artists.map((artist) => artist.name).join(", "), 32)} – ${short(track.title, 48)} – ${track.year ?? "?"} – ${short(genres.slice(0, 2).join(", "), 32) || "-"}${labels ? ` – ${labels}` : ""} – ${track.uri}`;
 }
 
 export function registerLibraryTools(
@@ -78,9 +90,11 @@ export function registerLibraryTools(
     "get_library",
     {
       description:
-        "Read the local Liked Songs cache. Optional case-insensitive genre/artist substring, release year, and added_after (ISO date or timestamp) filters combine with AND. Results are compact lines with Spotify URIs, newest-added first. No Spotify request is made.",
+        "Read the local Liked Songs cache. Genre (Spotify only), artist, Last.fm tag, release year, and added_after filters combine with AND. tag_level can restrict tag evidence to track or artist; use track evidence for tempo/rhythm hints. Results label Last.fm sources and include Spotify URIs. No network request is made.",
       inputSchema: z.strictObject({
         genre: textFilter,
+        tag: textFilter,
+        tag_level: z.enum(["any", "track", "artist"]).optional(),
         artist: textFilter,
         year: z.number().int().min(0).max(9999).optional(),
         added_after: addedAfter,
@@ -108,9 +122,11 @@ export function registerLibraryTools(
           returned: data.tracks.length,
           last_synced_at: data.last_synced_at,
           genre_coverage: data.genre_coverage,
+          tag_coverage: data.tag_coverage,
+          tag_source: { name: "Last.fm", url: "https://www.last.fm" },
         };
         const lines = data.tracks.map((track) =>
-          libraryLine(track, input.genre),
+          libraryLine(track, input.genre, input.tag),
         );
         return {
           content: [

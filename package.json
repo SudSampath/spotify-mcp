@@ -12,6 +12,7 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
     "auth": "pnpm build && node dist/auth/cli.js",
+    "lastfm:configure": "pnpm build && node dist/lastfm/configure.js",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome check --write .",

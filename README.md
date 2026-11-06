@@ -1,8 +1,9 @@
 # Spotify MCP
 
 Personal Spotify MCP server for Claude Code and Codex, running locally over stdio.
-The server has eight playback tools, two local-library tools, a direct Spotify
-Web API client, and PKCE login with automatic token refresh. It starts without
+The server has eight playback tools, two local-library tools, two Last.fm
+enrichment tools, a direct Spotify Web API client, and PKCE login with automatic
+token refresh. It starts without
 Spotify credentials; Spotify requests return login instructions until you connect
 your account. Catalog resolution and playlist curation are planned next.
 
@@ -40,7 +41,7 @@ After building:
 pnpm dlx @modelcontextprotocol/inspector@2.13.0 --cli node dist/index.js --method tools/list
 ```
 
-Expected result: the ten playback and library tools listed below. The pinned Inspector
+Expected result: the twelve playback, library, and enrichment tools listed below. The pinned Inspector
 command requires Node 22.19 or newer. To inspect interactively, omit `--cli` and
 `--method tools/list`.
 
@@ -84,10 +85,10 @@ pnpm dlx @modelcontextprotocol/inspector@2.13.0 --cli node dist/index.js --metho
 
 ## Liked Songs cache
 
-| Tool                                                                   | Behavior                                                                                                                                                                  |
-| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sync_library({full?})`                                                | Read Liked Songs and cache metadata locally. Incremental by default after the initial complete sync; `full: true` reconciles the entire cache and removes unliked tracks. |
-| `get_library({genre?, artist?, year?, added_after?, limit?, offset?})` | Read compact track lines from the local cache without calling Spotify.                                                                                                    |
+| Tool                                                                                     | Behavior                                                                                                                                                                  |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sync_library({full?})`                                                                  | Read Liked Songs and cache metadata locally. Incremental by default after the initial complete sync; `full: true` reconciles the entire cache and removes unliked tracks. |
+| `get_library({genre?, artist?, tag?, tag_level?, year?, added_after?, limit?, offset?})` | Read compact track lines from the local cache without calling Spotify.                                                                                                    |
 
 The database is `~/.config/spotify-mcp/library.sqlite`, with mode `0600` inside the
 private config directory. Tracks retain URI, title, artists, album, release year,
@@ -127,7 +128,62 @@ unproductive requests.
 Sync and query results report genre coverage and warn when the field was omitted.
 Genre filtering uses only actual cached labels; missing metadata is never guessed.
 Artist genres are hints about a track, rather than track-level classifications.
-Last.fm enrichment is planned next to supply separately attributed community tags.
+Last.fm tags are stored separately and can be queried with the `tag` filter below.
+
+## Last.fm enrichment
+
+Community tag metadata is provided by [Last.fm](https://www.last.fm), with catalogue
+and tag links included in lookup results. Tags are qualitative evidence: they do
+not provide measured BPM, beat grids, or audio-derived energy. Artist tags describe
+an artist's styles and do not establish that every track has those qualities.
+
+Set up a key locally:
+
+1. Create an application at [Last.fm API accounts](https://www.last.fm/api/account/create).
+   These public read methods do not need a callback URL or Last.fm user-session login.
+2. From this project, run `pnpm lastfm:configure` in an interactive terminal. Paste
+   the API key at the hidden-input prompt. The shared secret is not used.
+3. The key is saved to `~/.config/spotify-mcp/lastfm.json` with mode `0600` in the
+   private config directory. `LASTFM_API_KEY` can override the file. Keep actual
+   values outside the repository, chat, and command-line arguments.
+
+| Tool                                                                                 | Behavior                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `get_track_tags({uri?, artist?, title?, include_artist_fallback?, request_budget?})` | Look up one cached Spotify URI, or an artist/title pair. Returns track tags with source, raw labels, normalized labels, counts when supplied, source URLs, and timestamps. Artist fallback is opt-in and returned separately. |
+| `enrich_library({scope?, limit?, offset?, request_budget?})`                         | Enrich a bounded slice of cached Liked Songs with artist- or track-level tags. Defaults to artist scope, 20 selected tracks, offset 0, and at most 20 HTTP requests.                                                          |
+
+For example, call `enrich_library` with `{ "scope": "artist", "limit": 20,
+"request_budget": 20 }`, then query `get_library` with `{ "tag": "jazz",
+"tag_level": "artist" }`. For tempo or rhythmic hints, enrich track scope and use
+`tag_level: "track"`. Results retain their source and evidence level; an artist's
+tag is never silently converted into a track tag or a Spotify genre.
+
+`get_library` accepts `tag` and `tag_level` (`any`, `track`, or `artist`) alongside
+its existing filters. It queries only unexpired cached evidence and reports
+track-level and artist-level coverage separately. Missing, expired, and unprocessed
+metadata do not match a tag filter. The existing `genre` filter continues to use
+Spotify artist genres only. Compact lines label Last.fm evidence; `get_track_tags`
+provides the complete source links and metadata for a selected URI.
+
+Batch work is explicit and bounded: `limit` is at most 50 tracks and
+`request_budget` is at most 50 HTTP attempts, including retries. `get_track_tags`
+has a separate default budget of 3, maximum 5. Multi-artist tracks and retries can
+exhaust a batch budget before all selected tracks finish. Resume with the returned
+`next_offset`, which points to the first incomplete track. Shared artist lookups
+are reused across that artist's cached tracks. The tools never silently scan the
+entire library, scrobble, change Last.fm data, or write to Spotify.
+
+Positive lookups expire after 24 hours and empty/not-found lookups after 6 hours.
+Shorter provider cache lifetimes are honored; `no-store`/`no-cache` responses are
+not persisted. Failures are not cached as empty results. Requests are serialized
+and gently paced, with bounded retries for transient HTTP/API failures and support
+for `Retry-After`, including Last.fm error payloads returned with HTTP 200. API keys
+and credential-bearing URLs are excluded from surfaced errors and stored source
+links. Missing keys or outages leave Spotify tools and cached-library reads usable.
+
+This phase enriches the local library. Tag/seed discovery and catalog candidates
+will follow the Spotify identity resolver; arbitrary Last.fm name lookups do not
+invent Spotify URIs.
 
 ## Connect your Spotify account
 
@@ -203,5 +259,5 @@ SQLite data. Use only synthetic fixtures in the repository.
 - [Spotify saved tracks](https://developer.spotify.com/documentation/web-api/reference/get-users-saved-tracks)
 - [Spotify artist metadata](https://developer.spotify.com/documentation/web-api/reference/get-an-artist)
 
-Planned next: Last.fm tag enrichment, catalog resolution, playlist previews and
-commits, and tag-/seed-based discovery.
+Planned next: catalog resolution, tag-/seed-based discovery, and playlist previews
+and commits.

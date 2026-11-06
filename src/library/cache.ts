@@ -2,6 +2,8 @@ import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import { CONFIG_DIRECTORY } from "../auth/config.js";
+import type { LastfmLookup, TagEvidence } from "../lastfm/types.js";
+import { normalizeTag } from "../lastfm/types.js";
 
 export interface CachedArtist {
   id: string;
@@ -19,6 +21,7 @@ export interface CachedTrack {
 }
 export interface LibraryTrack extends CachedTrack {
   genres: string[];
+  tags: TagEvidence[];
 }
 export interface LibraryFilters {
   genre?: string | undefined;
@@ -27,6 +30,9 @@ export interface LibraryFilters {
   added_after?: string | undefined;
   limit: number;
   offset: number;
+  uri?: string | undefined;
+  tag?: string | undefined;
+  tag_level?: "track" | "artist" | "any" | undefined;
 }
 
 function processAlive(pid: number): boolean {
@@ -81,6 +87,19 @@ export class LibraryCache {
           id INTEGER PRIMARY KEY CHECK (id = 1), omitted_samples INTEGER NOT NULL,
           field_seen INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS lastfm_lookups (
+          cache_key TEXT PRIMARY KEY, level TEXT NOT NULL CHECK (level IN ('track', 'artist')),
+          artist TEXT NOT NULL, title TEXT, tags TEXT NOT NULL, source_url TEXT NOT NULL,
+          fetched_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, not_found INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS lastfm_artist_links (
+          artist_id TEXT PRIMARY KEY REFERENCES artists(id) ON DELETE CASCADE,
+          lookup_key TEXT NOT NULL REFERENCES lastfm_lookups(cache_key)
+        );
+        CREATE TABLE IF NOT EXISTS lastfm_track_links (
+          track_uri TEXT PRIMARY KEY REFERENCES tracks(uri) ON DELETE CASCADE,
+          lookup_key TEXT NOT NULL REFERENCES lastfm_lookups(cache_key)
+        );
       `);
       return new LibraryCache(database, path);
     } catch (error) {
@@ -112,7 +131,7 @@ export class LibraryCache {
         .get();
       if (current && processAlive(Number(current.pid))) {
         throw new Error(
-          "A library sync is already running. Wait for it to finish, then retry.",
+          "A library sync or enrichment is already running. Wait for it to finish, then retry.",
         );
       }
       this.database
@@ -263,9 +282,124 @@ export class LibraryCache {
     );
   }
 
-  query(filters: LibraryFilters): { total: number; tracks: LibraryTrack[] } {
+  readLastfmLookup(key: string, now = Date.now()): LastfmLookup | null {
+    const row = this.database
+      .prepare(
+        "SELECT * FROM lastfm_lookups WHERE cache_key = ? AND expires_at > ?",
+      )
+      .get(key, now);
+    return row ? this.lookupFromRow(row) : null;
+  }
+
+  private lookupFromRow(row: Record<string, unknown>): LastfmLookup {
+    return {
+      key: String(row.cache_key),
+      level: row.level === "track" ? "track" : "artist",
+      artist: String(row.artist),
+      title: row.title === null ? null : String(row.title),
+      tags: JSON.parse(String(row.tags)) as LastfmLookup["tags"],
+      sourceUrl: String(row.source_url),
+      fetchedAt: Number(row.fetched_at),
+      expiresAt: Number(row.expires_at),
+      notFound: Number(row.not_found) === 1,
+    };
+  }
+
+  saveLastfmLookup(lookup: LastfmLookup): void {
+    this.database
+      .prepare(`INSERT INTO lastfm_lookups
+      (cache_key, level, artist, title, tags, source_url, fetched_at, expires_at, not_found) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(cache_key) DO UPDATE SET artist = excluded.artist, title = excluded.title,
+      tags = excluded.tags, source_url = excluded.source_url, fetched_at = excluded.fetched_at,
+      expires_at = excluded.expires_at, not_found = excluded.not_found`)
+      .run(
+        lookup.key,
+        lookup.level,
+        lookup.artist,
+        lookup.title,
+        JSON.stringify(lookup.tags),
+        lookup.sourceUrl,
+        lookup.fetchedAt,
+        lookup.expiresAt,
+        Number(lookup.notFound),
+      );
+  }
+
+  linkLastfmArtist(artistId: string, key: string): void {
+    this.database
+      .prepare(`INSERT INTO lastfm_artist_links (artist_id, lookup_key) VALUES (?, ?)
+      ON CONFLICT(artist_id) DO UPDATE SET lookup_key = excluded.lookup_key`)
+      .run(artistId, key);
+  }
+
+  linkLastfmTrack(uri: string, key: string): void {
+    this.database
+      .prepare(`INSERT INTO lastfm_track_links (track_uri, lookup_key) VALUES (?, ?)
+      ON CONFLICT(track_uri) DO UPDATE SET lookup_key = excluded.lookup_key`)
+      .run(uri, key);
+  }
+
+  private tagsForTrack(uri: string, now: number): TagEvidence[] {
+    const rows = this.database
+      .prepare(`SELECT DISTINCT l.* FROM lastfm_lookups l WHERE l.expires_at > ? AND
+      (l.cache_key IN (SELECT lookup_key FROM lastfm_track_links WHERE track_uri = ?)
+       OR l.cache_key IN (SELECT a.lookup_key FROM lastfm_artist_links a JOIN track_artists ta ON ta.artist_id = a.artist_id WHERE ta.track_uri = ?))
+      ORDER BY l.level DESC, l.fetched_at DESC`)
+      .all(now, uri, uri);
+    return rows.flatMap((row) => {
+      const lookup = this.lookupFromRow(row);
+      return lookup.tags.map((tag) => ({
+        ...tag,
+        source: "Last.fm" as const,
+        level: lookup.level,
+        source_url: lookup.sourceUrl,
+        fetched_at: new Date(lookup.fetchedAt).toISOString(),
+        expires_at: new Date(lookup.expiresAt).toISOString(),
+      }));
+    });
+  }
+
+  lastfmCoverage(now = Date.now()) {
+    const row = this.database
+      .prepare(`SELECT COUNT(*) AS total,
+      COALESCE(SUM(EXISTS (SELECT 1 FROM lastfm_track_links a JOIN lastfm_lookups l ON l.cache_key = a.lookup_key
+        WHERE a.track_uri = t.uri AND l.expires_at > ? AND json_array_length(l.tags) > 0)), 0) AS track_tags,
+      COALESCE(SUM(EXISTS (SELECT 1 FROM track_artists ta JOIN lastfm_artist_links a ON a.artist_id = ta.artist_id
+        JOIN lastfm_lookups l ON l.cache_key = a.lookup_key WHERE ta.track_uri = t.uri AND l.expires_at > ? AND json_array_length(l.tags) > 0)), 0) AS artist_tags
+      FROM tracks t`)
+      .get(now, now);
+    return {
+      total_tracks: Number(row?.total ?? 0),
+      tracks_with_track_tags: Number(row?.track_tags ?? 0),
+      tracks_with_artist_tags: Number(row?.artist_tags ?? 0),
+    };
+  }
+
+  query(
+    filters: LibraryFilters,
+    now = Date.now(),
+  ): { total: number; tracks: LibraryTrack[] } {
     const conditions: string[] = [];
     const values: SQLInputValue[] = [];
+    if (filters.uri) {
+      conditions.push("t.uri = ?");
+      values.push(filters.uri);
+    }
+    if (filters.tag) {
+      const branches: string[] = [];
+      if (filters.tag_level !== "artist") {
+        branches.push(`EXISTS (SELECT 1 FROM lastfm_track_links a JOIN lastfm_lookups l ON l.cache_key = a.lookup_key,
+          json_each(l.tags) tag WHERE a.track_uri = t.uri AND l.expires_at > ? AND instr(json_extract(tag.value, '$.normalized'), ?) > 0)`);
+        values.push(now, normalizeTag(filters.tag));
+      }
+      if (filters.tag_level !== "track") {
+        branches.push(`EXISTS (SELECT 1 FROM track_artists ta JOIN lastfm_artist_links a ON a.artist_id = ta.artist_id
+          JOIN lastfm_lookups l ON l.cache_key = a.lookup_key, json_each(l.tags) tag
+          WHERE ta.track_uri = t.uri AND l.expires_at > ? AND instr(json_extract(tag.value, '$.normalized'), ?) > 0)`);
+        values.push(now, normalizeTag(filters.tag));
+      }
+      conditions.push(`(${branches.join(" OR ")})`);
+    }
     if (filters.genre) {
       conditions.push(`EXISTS (SELECT 1 FROM track_artists ta JOIN artists a ON a.id = ta.artist_id,
         json_each(a.genres) genre WHERE ta.track_uri = t.uri AND instr(lower(genre.value), lower(?)) > 0)`);
@@ -318,6 +452,7 @@ export class LibraryCache {
             ),
           ),
         ],
+        tags: this.tagsForTrack(String(row.uri), now),
       };
     });
     return { total, tracks };

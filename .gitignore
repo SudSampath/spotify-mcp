@@ -30,6 +30,7 @@ credentials/
 *credentials*.json
 *secret*.json
 spotify-config.json
+lastfm.json
 spotify-mcp.config.*
 *.sqlite
 *.sqlite-*

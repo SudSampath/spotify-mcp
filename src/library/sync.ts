@@ -191,6 +191,7 @@ export class LibraryService {
         status: "ready" as const,
         last_synced_at: state.completedAt,
         genre_coverage: cache.genreCoverage(),
+        tag_coverage: cache.lastfmCoverage(),
         ...cache.query(filters),
       };
     } finally {
