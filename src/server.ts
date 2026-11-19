@@ -8,6 +8,7 @@ import { registerDiscoveryTools } from "./tools/discovery.js";
 import { registerLastfmTools } from "./tools/lastfm.js";
 import { registerLibraryTools } from "./tools/library.js";
 import { registerPlaybackTools } from "./tools/playback.js";
+import { registerPlaylistTools } from "./tools/playlists.js";
 
 export function createServer(
   client: SpotifyClient = createSpotifyClient(),
@@ -19,6 +20,7 @@ export function createServer(
     { capabilities: { tools: {} } },
   );
   registerPlaybackTools(server, client);
+  registerPlaylistTools(server, client, openLibraryCache);
   registerCatalogTools(server, client);
   registerLibraryTools(server, client, openLibraryCache);
   const lastfm = lastfmClient ?? new LastfmClient();

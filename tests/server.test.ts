@@ -25,11 +25,15 @@ it("Given the built server without credentials, when a stdio client connects, th
     await expect(client.ping()).resolves.toEqual({});
     const listing = await client.listTools();
     expect(listing.tools.map((tool) => tool.name).sort()).toEqual([
+      "add_to_playlist",
+      "commit_playlist",
+      "create_playlist",
       "discover_tracks",
       "enrich_library",
       "get_library",
       "get_track_tags",
       "list_devices",
+      "list_playlists",
       "next",
       "now_playing",
       "pause",
@@ -47,10 +51,13 @@ it("Given the built server without credentials, when a stdio client connects, th
         .map((tool) => tool.name)
         .sort(),
     ).toEqual([
+      "add_to_playlist",
+      "create_playlist",
       "discover_tracks",
       "get_library",
       "get_track_tags",
       "list_devices",
+      "list_playlists",
       "now_playing",
       "resolve_tracks",
       "search",

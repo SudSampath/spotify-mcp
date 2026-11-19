@@ -8,6 +8,7 @@ import type {
   TagEvidence,
 } from "../lastfm/types.js";
 import { normalizeTag } from "../lastfm/types.js";
+import { PreviewStore } from "../playlist/store.js";
 import type { CatalogItem } from "../spotify/catalog.js";
 
 export interface CachedArtist {
@@ -120,6 +121,10 @@ export class LibraryCache {
 
   close(): void {
     this.database.close();
+  }
+
+  playlistPreviews(): PreviewStore {
+    return new PreviewStore(this.database);
   }
 
   private transaction<T>(action: () => T): T {

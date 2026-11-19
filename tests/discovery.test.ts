@@ -399,7 +399,7 @@ describe("Last.fm discovery", () => {
     expect(result.results.map((value) => value.uri)).toEqual([catalog(1).uri]);
     expect(result.warnings.join(" ")).toContain("lastfm:configure");
     expect(fetch).not.toHaveBeenCalled();
-    expect((await client.listTools()).tools.length).toBe(15);
+    expect((await client.listTools()).tools.length).toBe(19);
   });
 
   it("Given a provider error containing credentials, when returned as a warning, then removes secrets and does not cache the error", async () => {

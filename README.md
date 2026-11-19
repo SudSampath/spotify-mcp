@@ -1,11 +1,11 @@
 # Spotify MCP
 
 Personal Spotify MCP server for Claude Code and Codex, running locally over stdio.
-The server has fifteen tools for playback, catalog search and resolution, a local
+The server has nineteen tools for playback, catalog search and resolution, a local
 Liked Songs cache, and optional Last.fm enrichment and discovery. It uses the
 Spotify Web API with PKCE login and automatic token refresh. It starts without
 credentials; Spotify requests return login instructions until you connect your
-account. Playlist previews and creation are planned next.
+account. Playlist changes require an explicit preview and approval.
 
 ## Develop
 
@@ -41,7 +41,7 @@ After building:
 pnpm dlx @modelcontextprotocol/inspector@2.13.0 --cli node dist/index.js --method tools/list
 ```
 
-Expected result: fifteen playback, catalog, library, and Last.fm tools listed below. The pinned Inspector
+Expected result: nineteen playback, catalog, library, and Last.fm tools listed below. The pinned Inspector
 command requires Node 22.19 or newer. To inspect interactively, omit `--cli` and
 `--method tools/list`.
 
@@ -108,6 +108,47 @@ For example, `resolve_tracks` accepts:
 
 Both tools are read-only, honor Spotify rate limits, and support cancellation.
 Batch resolution sends progress notifications when the MCP client requests them.
+
+## Playlist previews and commits
+
+| Tool                                                   | Behavior                                                                                                                                        |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_playlists({limit?, offset?})`                    | Read playlist IDs, names, track counts, ownership, visibility, and URLs. Defaults to 20 results, maximum 50, with `next_offset` for pagination. |
+| `create_playlist({name, description?, uris, public?})` | Prepare a local preview for a new playlist. Defaults to private; no Spotify changes.                                                            |
+| `add_to_playlist({playlist_id, uris})`                 | Prepare a local preview of additions to an existing owned or collaborative playlist. No Spotify changes.                                        |
+| `commit_playlist({preview_id})`                        | Write the exact approved preview: create a playlist if needed, then append tracks in batches of at most 100.                                    |
+
+First use library filtering/discovery and `resolve_tracks` to choose real tracks.
+Both preview tools accept at most 500 track URIs. They preserve input order, list
+removed duplicates and invalid/unavailable URIs, and tag tracks as `library` or
+`catalog`. Cached identities are reused; catalog URIs are verified with Spotify.
+Only valid, verified tracks enter the preview. An empty preview cannot be committed.
+Previews list titles/artists, name, description, visibility, and track count.
+
+**Show the full preview and wait for explicit approval in chat before calling
+`commit_playlist`.** Preparing a preview never authorizes committing it. Playlist
+addition previews preserve existing items and deduplicate only within the request.
+
+Preview tokens expire after 30 minutes and are bound to the Spotify account that
+prepared them. They persist privately in the local SQLite cache. Committing checks
+the account and target access again, then atomically claims the token before any
+Spotify write. Multiple processes and server restarts share the same token state.
+A successful repeat returns `already_committed` and the existing URL without writes.
+Owned playlists are editable; collaborative targets must also appear in the current
+user's playlists, and Spotify remains authoritative about final write permission.
+
+The response separates confirmed additions, rejected URIs, uncertain URIs, and
+unattempted URIs. Network loss, malformed success responses, or server errors may
+mean a write happened without confirmation. Such previews are consumed and cannot
+be retried. Review the existing playlist manually before preparing a replacement
+preview; never automatically repeat a possibly successful write. Interrupted
+processes likewise retain their claim and report uncertainty. Rate-limit rejections
+still use the HTTP client's bounded retries and `Retry-After` handling.
+
+`list_playlists`, `create_playlist`, and `add_to_playlist` are annotated read-only
+with respect to Spotify. Only `commit_playlist` changes playlists. No deletion,
+removal, or reordering tools are provided. Test coverage includes the complete
+sync → resolve → preview → commit flow using synthetic data and mocked HTTP.
 
 ## Liked Songs cache
 
@@ -312,6 +353,9 @@ SQLite data. Use only synthetic fixtures in the repository.
 
 ## References and next work
 
+- [Spotify playlist creation](https://developer.spotify.com/documentation/web-api/reference/create-playlist)
+- [Spotify playlist additions](https://developer.spotify.com/documentation/web-api/reference/add-items-to-playlist)
+
 - [Spotify catalog search](https://developer.spotify.com/documentation/web-api/reference/search)
 - [Last.fm tag charts](https://www.last.fm/api/show/tag.getTopTracks)
 - [Last.fm similar tracks](https://www.last.fm/api/show/track.getSimilar)
@@ -324,4 +368,5 @@ SQLite data. Use only synthetic fixtures in the repository.
 - [Spotify saved tracks](https://developer.spotify.com/documentation/web-api/reference/get-users-saved-tracks)
 - [Spotify artist metadata](https://developer.spotify.com/documentation/web-api/reference/get-an-artist)
 
-Planned next: playlist previews and explicit creation/updates.
+Planned next: whole-library tag enrichment, shared agent workflow instructions,
+and end-to-end verification from Claude Code and Codex.
