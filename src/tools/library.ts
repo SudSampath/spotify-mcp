@@ -37,7 +37,10 @@ export function libraryLine(
     : track.tags;
   const labels = tags
     .slice(0, 2)
-    .map((value) => `Last.fm ${value.level}: ${short(value.name, 20)}`)
+    .map(
+      (value) =>
+        `Last.fm ${value.level}${value.stale ? " (stale)" : ""}: ${short(value.name, 20)}`,
+    )
     .join(", ");
   return `${short(track.artists.map((artist) => artist.name).join(", "), 32)} – ${short(track.title, 48)} – ${track.year ?? "?"} – ${short(genres.slice(0, 2).join(", "), 32) || "-"}${labels ? ` – ${labels}` : ""} – ${track.uri}`;
 }
@@ -90,7 +93,7 @@ export function registerLibraryTools(
     "get_library",
     {
       description:
-        "Read the local Liked Songs cache. Genre (Spotify only), artist, Last.fm tag, release year, and added_after filters combine with AND. tag_level can restrict tag evidence to track or artist; use track evidence for tempo/rhythm hints. Results label Last.fm sources and include Spotify URIs. No network request is made.",
+        "Read the local Liked Songs cache. Genre (Spotify only), artist, Last.fm tag, release year, and added_after filters combine with AND. tag_level can restrict tag evidence to track or artist; use track evidence for tempo/rhythm hints. Results label Last.fm sources, permitted stale tags, and Spotify URIs. Coverage describes the whole library, including empty and missing lookups. No network request is made.",
       inputSchema: z.strictObject({
         genre: textFilter,
         tag: textFilter,

@@ -360,7 +360,7 @@ describe("Track-specific evidence", () => {
   );
 });
 
-it("Given positive and empty lookups, when TTLs expire, then refreshes them and excludes expired evidence from filters", async () => {
+it("Given positive and empty lookups, when TTLs expire, then refreshes them and keeps permitted stale evidence until refreshed", async () => {
   await seed();
   let now = Date.now();
   const enrichment = new LastfmEnrichment(lastfm, openCache, () => now);
@@ -374,16 +374,16 @@ it("Given positive and empty lookups, when TTLs expire, then refreshes them and 
     request_budget: 2,
   };
   await enrichment.getTrackTags(input);
-  now += 24 * 60 * 60 * 1_000 - 1;
+  now += 30 * 24 * 60 * 60 * 1_000 - 1;
   expect((await enrichment.getTrackTags(input)).track.cache_hit).toBe(true);
   now++;
   const cache = await openCache();
   expect(
     cache.query({ tag: "Breakbeat", limit: 10, offset: 0 }, now).total,
-  ).toBe(0);
+  ).toBe(1);
   cache.close();
   expect((await enrichment.getTrackTags(input)).track.status).toBe("empty");
-  now += 6 * 60 * 60 * 1_000 - 1;
+  now += 7 * 24 * 60 * 60 * 1_000 - 1;
   expect((await enrichment.getTrackTags(input)).track.cache_hit).toBe(true);
   now++;
   expect((await enrichment.getTrackTags(input)).track.status).toBe("tagged");

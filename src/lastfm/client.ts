@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { loadLastfmApiKey } from "./config.js";
 import {
@@ -148,6 +149,7 @@ export class LastfmClient {
   private readonly now: () => number;
   private readonly maxRetries: number;
   private readonly minInterval: number;
+  private readonly customSleep: boolean;
   private queued: Promise<unknown> = Promise.resolve();
   private lastStarted: number | undefined;
 
@@ -157,6 +159,7 @@ export class LastfmClient {
     this.sleep =
       options.sleep ??
       ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.customSleep = options.sleep !== undefined;
     this.now = options.now ?? Date.now;
     this.maxRetries = options.maxRetries ?? 2;
     this.minInterval = options.minIntervalMs ?? 250;
@@ -179,6 +182,7 @@ export class LastfmClient {
     tags: LastfmTag[];
     sourceUrl: string;
     notFound: boolean;
+    allowStale: boolean;
     cacheTtlMs: number | undefined;
   }> {
     const operation = this.queued.then(() =>
@@ -186,6 +190,12 @@ export class LastfmClient {
     );
     this.queued = operation.catch(() => {});
     return operation;
+  }
+
+  private async pause(ms: number, signal?: AbortSignal): Promise<void> {
+    if (this.customSleep) await this.sleep(ms);
+    else await delay(ms, undefined, { signal });
+    signal?.throwIfAborted();
   }
 
   getTagTracks(
@@ -235,7 +245,7 @@ export class LastfmClient {
       options.budget.take();
       if (this.lastStarted !== undefined) {
         const wait = this.minInterval - (this.now() - this.lastStarted);
-        if (wait > 0) await this.sleep(wait);
+        if (wait > 0) await this.pause(wait, options.signal);
       }
       options.signal?.throwIfAborted();
       this.lastStarted = this.now();
@@ -256,7 +266,7 @@ export class LastfmClient {
           attempt < this.maxRetries &&
           options.budget.used < options.budget.limit
         ) {
-          await this.sleep(1_000 * 2 ** attempt);
+          await this.pause(1_000 * 2 ** attempt, options.signal);
           continue;
         }
         throw new LastfmApiError(undefined, undefined);
@@ -279,12 +289,13 @@ export class LastfmClient {
         attempt < this.maxRetries &&
         options.budget.used < options.budget.limit
       ) {
-        await this.sleep(
+        await this.pause(
           retryDelay(
             response.headers.get("Retry-After"),
             1_000 * 2 ** attempt,
             this.now(),
           ),
+          options.signal,
         );
         continue;
       }
@@ -295,6 +306,12 @@ export class LastfmClient {
         notFound: code === 6,
         status: response.status,
         cacheTtlMs: cacheLifetime(response.headers, this.now()),
+        allowStale:
+          !/no-store|no-cache|must-revalidate|proxy-revalidate|max-age|s-maxage/i.test(
+            response.headers.get("Cache-Control") ?? "",
+          ) &&
+          !response.headers.has("Expires") &&
+          !/no-cache/i.test(response.headers.get("Pragma") ?? ""),
         redact: (value: string, replacement = "[redacted]") =>
           value.replaceAll(key, replacement),
       };
@@ -323,6 +340,7 @@ export class LastfmClient {
         tags: [],
         sourceUrl: sourceUrl(level, artist, title ?? undefined),
         notFound: true,
+        allowStale: response.allowStale,
         cacheTtlMs: response.cacheTtlMs,
       };
     const parsed = tagsSchema.safeParse(response.body);
@@ -362,6 +380,7 @@ export class LastfmClient {
       tags: [...tags.values()].slice(0, 20),
       sourceUrl: sourceUrl(level, artist, title ?? undefined),
       notFound: false,
+      allowStale: response.allowStale,
       cacheTtlMs: response.cacheTtlMs,
     };
   }

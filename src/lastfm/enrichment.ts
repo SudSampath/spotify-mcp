@@ -7,8 +7,23 @@ import {
 } from "./client.js";
 import { type LastfmLookup, normalizeTag, type TagLevel } from "./types.js";
 
-const POSITIVE_TTL = 24 * 60 * 60 * 1_000;
-const EMPTY_TTL = 6 * 60 * 60 * 1_000;
+const POSITIVE_TTL = 30 * 24 * 60 * 60 * 1_000;
+const EMPTY_TTL = 7 * 24 * 60 * 60 * 1_000;
+
+export interface WholeLibraryInput {
+  scope?: "all" | TagLevel | undefined;
+  request_budget?: number | undefined;
+  signal?: AbortSignal | undefined;
+  onProgress?:
+    | ((progress: {
+        phase: TagLevel;
+        processed: number;
+        total: number;
+        requests: number;
+        cache_hits: number;
+      }) => Promise<void>)
+    | undefined;
+}
 export interface EnrichInput {
   scope: TagLevel;
   limit: number;
@@ -102,6 +117,7 @@ export class LastfmEnrichment {
       expiresAt: fetchedAt + ttl,
     };
     if (ttl > 0) cache.saveLastfmLookup(lookup);
+    else cache.deleteLastfmLookup(key);
     return { lookup, cacheHit: false };
   }
 
@@ -163,6 +179,107 @@ export class LastfmEnrichment {
         requests_made: budget.used,
         budget_exhausted: exhausted,
         note: "Last.fm community tags are qualitative hints. Artist tags describe the artist; neither source measures BPM or beats.",
+      };
+    } finally {
+      if (acquired) cache.releaseSync(owner);
+      cache.close();
+    }
+  }
+
+  async enrichAll(input: WholeLibraryInput = {}) {
+    const cache = await this.openCache();
+    const owner = randomUUID();
+    let acquired = false;
+    try {
+      if (!cache.state())
+        return {
+          status: "needs_sync" as const,
+          message: "Run sync_library before tagging the whole library.",
+          coverage: cache.lastfmCoverage(this.now()),
+        };
+      cache.acquireSync(owner);
+      acquired = true;
+      const budget = new RequestBudget(
+        input.request_budget ?? Number.MAX_SAFE_INTEGER,
+      );
+      const scope = input.scope ?? "all";
+      const artists = cache.enrichmentArtists();
+      const tracks = cache.identityTracks();
+      const counts = {
+        artist: { processed: 0, total: scope === "track" ? 0 : artists.length },
+        track: { processed: 0, total: scope === "artist" ? 0 : tracks.length },
+      };
+      const targets = [
+        ...(scope === "track"
+          ? []
+          : artists.map((artist) => ({
+              level: "artist" as const,
+              id: artist.id,
+              artist: artist.name,
+              title: null,
+            }))),
+        ...(scope === "artist"
+          ? []
+          : tracks.map((track) => ({
+              level: "track" as const,
+              id: track.uri,
+              artist: track.artists[0] ?? "",
+              title: track.name,
+            }))),
+      ];
+      let cacheHits = 0;
+      let empty = 0;
+      let uncacheable = 0;
+      let exhausted = false;
+      for (const target of targets) {
+        input.signal?.throwIfAborted();
+        if (!target.artist)
+          throw new Error(
+            "A cached track has no artist identity. Run sync_library before enrichment.",
+          );
+        try {
+          const found = await this.lookup(
+            cache,
+            target.level,
+            target.artist,
+            target.title,
+            budget,
+            input.signal,
+          );
+          if (found.cacheHit) cacheHits++;
+          if (!found.lookup.tags.length) empty++;
+          if (found.lookup.expiresAt > this.now()) {
+            if (target.level === "artist")
+              cache.linkLastfmArtist(target.id, found.lookup.key);
+            else cache.linkLastfmTrack(target.id, found.lookup.key);
+          } else uncacheable++;
+          counts[target.level].processed++;
+          await input.onProgress?.({
+            phase: target.level,
+            ...counts[target.level],
+            requests: budget.used,
+            cache_hits: cacheHits,
+          });
+        } catch (error) {
+          if (!(error instanceof RequestBudgetExceeded)) throw error;
+          exhausted = true;
+          break;
+        }
+      }
+      return {
+        status: exhausted
+          ? ("budget_exhausted" as const)
+          : uncacheable
+            ? ("incomplete" as const)
+            : ("complete" as const),
+        phases: counts,
+        requests_made: budget.used,
+        cache_hits: cacheHits,
+        empty_lookups: empty,
+        uncacheable_lookups: uncacheable,
+        storage_bytes: cache.lastfmStorageBytes(),
+        coverage: cache.lastfmCoverage(this.now()),
+        note: "Artist lookups precede track lookups. Every stored result, including confirmed empty lookups, is a durable checkpoint. Reruns refresh due entries and link fresh cache hits without HTTP. Provider restrictions may prevent retaining some results.",
       };
     } finally {
       if (acquired) cache.releaseSync(owner);

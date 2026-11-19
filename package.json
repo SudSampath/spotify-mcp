@@ -17,7 +17,8 @@
     "lint": "biome check .",
     "format": "biome check --write .",
     "test": "pnpm build && vitest run",
-    "check": "pnpm lint && pnpm typecheck && pnpm test"
+    "check": "pnpm lint && pnpm typecheck && pnpm test",
+    "enrich:all": "pnpm build && node dist/lastfm/enrich-all-cli.js"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.4.0",

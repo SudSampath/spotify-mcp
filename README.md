@@ -226,9 +226,10 @@ For example, call `enrich_library` with `{ "scope": "artist", "limit": 20,
 tag is never silently converted into a track tag or a Spotify genre.
 
 `get_library` accepts `tag` and `tag_level` (`any`, `track`, or `artist`) alongside
-its existing filters. It queries only unexpired cached evidence and reports
-track-level and artist-level coverage separately. Missing, expired, and unprocessed
-metadata do not match a tag filter. The existing `genre` filter continues to use
+its existing filters. It reports track-level and artist-level coverage for the whole library, including
+recorded/empty/unprocessed lookups and fresh/stale tag counts. Provider-permitted
+stale labels continue to match after expiry and are marked `(stale)`; missing or
+provider-restricted expired metadata do not match. The existing `genre` filter continues to use
 Spotify artist genres only. Compact lines label Last.fm evidence; `get_track_tags`
 provides the complete source links and metadata for a selected URI.
 
@@ -240,13 +241,66 @@ exhaust a batch budget before all selected tracks finish. Resume with the return
 are reused across that artist's cached tracks. The tools never silently scan the
 entire library, scrobble, change Last.fm data, or write to Spotify.
 
-Positive lookups expire after 24 hours and empty/not-found lookups after 6 hours.
+Tag lookups refresh after 30 days, or 7 days when empty/not found.
 Shorter provider cache lifetimes are honored; `no-store`/`no-cache` responses are
 not persisted. Failures are not cached as empty results. Requests are serialized
 and gently paced, with bounded retries for transient HTTP/API failures and support
 for `Retry-After`, including Last.fm error payloads returned with HTTP 200. API keys
 and credential-bearing URLs are excluded from surfaced errors and stored source
 links. Missing keys or outages leave Spotify tools and cached-library reads usable.
+
+## Whole-library tagging
+
+Run this finite job in a terminal outside chat:
+
+```sh
+pnpm enrich:all
+pnpm enrich:all --status
+```
+
+The job tags every distinct library artist first, then every cached track using
+its primary artist/title. It requires a completed `sync_library` and the locally
+configured Last.fm key. Progress is printed as JSON lines containing counts, not
+track names or API keys. `--status` reads local coverage without credentials or
+HTTP. Artist and track lookup coverage includes confirmed empty results; tag
+coverage counts only actual labels. Both describe the whole library.
+
+Every successful or confirmed empty lookup is saved immediately. Ctrl-C/SIGTERM
+stops safely; rerun the same command to resume. Fresh completed lookups cost zero
+HTTP requests, and a rerun after syncing new songs only fetches new/due identities.
+The CLI runs at most two requests per second, with the existing serialized client,
+HTTP/API error handling and bounded rate-limit retries. Persistent provider errors
+stop the job with its checkpoints intact. Sync/enrichment writers are serialized
+while a job runs; cached reads remain available. There is no recurring service or
+automatic whole-library pass during an MCP tool call.
+
+Optional controls:
+
+```sh
+pnpm enrich:all --scope artist
+pnpm enrich:all --scope track
+pnpm enrich:all --max-requests 20
+```
+
+The request budget counts actual HTTP attempts, including retries. A bounded run
+reports `budget_exhausted`; a completed warm run reports zero requests. An
+`incomplete` result means provider restrictions prevented retaining some lookups.
+`--data-dir PATH` selects an alternate private config/cache directory.
+
+Our tag refresh defaults are 30 days for positive data and 7 days for empty data.
+Shorter provider lifetimes override these defaults; no-store/no-cache responses
+are not retained and remove any older snapshot for that identity. Stale labels
+remain searchable only when the saved provider policy allows it. Legacy entries
+without recorded policy are refreshed before stale reuse is enabled. Refreshing
+an empty result removes previous positive matches. Discovery candidate lists keep
+their separate 24-hour/6-hour expiry and are never served stale.
+
+The [Last.fm API terms](https://www.last.fm/api/tos), checked on 2026-11-19,
+require respecting response cache headers and limit retained Last.fm data to
+100 MB. The implementation uses a conservative 90 MB payload budget across tag
+and discovery caches, rejects writes beyond it, and reports stored bytes. The
+terms do not specify a fixed numeric request rate; the CLI's pacing is a local
+conservative choice, and provider rate-limit responses remain authoritative.
 
 ## Last.fm discovery
 
@@ -269,8 +323,8 @@ separately without actionable Spotify URIs.
 
 Multiple tags require evidence for every tag. Seed similarity alone cannot prove
 a requested tag. `tag_level` controls cached evidence (`any` by default, or
-`track`/`artist`); tag-chart associations are track evidence. Unknown and expired
-labels do not match. Similarity and tags describe community associations, not
+`track`/`artist`); tag-chart associations are track evidence. Unknown labels do not match. Permitted stale library labels remain usable with
+explicit stale evidence; expired provider-restricted labels do not match. Similarity and tags describe community associations, not
 measured BPM or beats. Sparse coverage can yield fewer results than requested;
 responses include coverage, request counts, and warnings.
 
@@ -368,5 +422,5 @@ SQLite data. Use only synthetic fixtures in the repository.
 - [Spotify saved tracks](https://developer.spotify.com/documentation/web-api/reference/get-users-saved-tracks)
 - [Spotify artist metadata](https://developer.spotify.com/documentation/web-api/reference/get-an-artist)
 
-Planned next: whole-library tag enrichment, shared agent workflow instructions,
-and end-to-end verification from Claude Code and Codex.
+Planned next: shared agent workflow instructions and end-to-end verification
+from Claude Code and Codex.

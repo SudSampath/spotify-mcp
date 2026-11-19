@@ -39,6 +39,7 @@ export interface LastfmLookup {
   fetchedAt: number;
   expiresAt: number;
   notFound: boolean;
+  allowStale?: boolean | undefined;
 }
 
 export interface TagEvidence extends LastfmTag {
@@ -47,6 +48,7 @@ export interface TagEvidence extends LastfmTag {
   source_url: string;
   fetched_at: string;
   expires_at: string;
+  stale: boolean;
 }
 
 export function normalizeTag(value: string): string {

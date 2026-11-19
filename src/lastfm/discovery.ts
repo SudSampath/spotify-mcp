@@ -27,6 +27,7 @@ interface Evidence {
   similarity_score?: number | undefined;
   count?: number | null | undefined;
   rank?: number | undefined;
+  stale?: boolean | undefined;
   fetched_at: string;
   expires_at: string;
 }
@@ -151,6 +152,7 @@ export class DiscoveryService {
                 tag: tag.name,
                 level: tag.level,
                 count: tag.count,
+                stale: tag.stale,
                 fetched_at: tag.fetched_at,
                 expires_at: tag.expires_at,
               })),
@@ -313,6 +315,7 @@ export class DiscoveryService {
               tag: tag.name,
               level: tag.level,
               count: tag.count,
+              stale: tag.stale,
               fetched_at: tag.fetched_at,
               expires_at: tag.expires_at,
             }));
